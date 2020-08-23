@@ -19,7 +19,6 @@ from architect import Architect
 from tensorboard_logger import configure, log_value
 import pdb
 
-
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
@@ -50,173 +49,186 @@ args = parser.parse_args()
 
 args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
 if args.debug:
-  args.save += "_debug"
+    args.save += "_debug"
 utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
 
 log_format = '%(asctime)s %(message)s'
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
-    format=log_format, datefmt='%m/%d %I:%M:%S %p')
+                    format=log_format, datefmt='%m/%d %I:%M:%S %p')
 fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
 fh.setFormatter(logging.Formatter(log_format))
 logging.getLogger().addHandler(fh)
-configure(args.save + "/%s"%(args.name))
-
+configure(args.save + "/%s" % (args.name))
 
 CIFAR_CLASSES = 10
 
 
 def main():
-  if not torch.cuda.is_available():
-    logging.info('no gpu device available')
-    sys.exit(1)
+    if not torch.cuda.is_available():
+        logging.info('no gpu device available')
+        sys.exit(1)
 
-  np.random.seed(args.seed)
-  torch.cuda.set_device(args.gpu)
-  cudnn.benchmark = True
-  torch.manual_seed(args.seed)
-  cudnn.enabled=True
-  torch.cuda.manual_seed(args.seed)
-  logging.info('gpu device = %d' % args.gpu)
-  logging.info("args = %s", args)
+    np.random.seed(args.seed)
+    torch.cuda.set_device(args.gpu)
+    cudnn.benchmark = True
+    torch.manual_seed(args.seed)
+    cudnn.enabled = True
+    torch.cuda.manual_seed(args.seed)
+    logging.info('gpu device = %d' % args.gpu)
+    logging.info("args = %s", args)
 
-  criterion = nn.CrossEntropyLoss()
-  criterion = criterion.cuda()
-  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.greedy, args.l2)
-  model = model.cuda()
-  logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
+    criterion = nn.CrossEntropyLoss()
+    criterion = criterion.cuda()
+    model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.greedy, args.l2)
+    model = model.cuda()
+    logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
-  optimizer = torch.optim.SGD(
-      model.parameters(),
-      args.learning_rate,
-      momentum=args.momentum,
-      weight_decay=args.weight_decay)
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        args.learning_rate,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay)
 
-  train_transform, valid_transform = utils._data_transforms_cifar10(args)
-  train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
+    train_transform, valid_transform = utils._data_transforms_cifar10(args)
+    train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
 
-  num_train = len(train_data)
-  indices = list(range(num_train))
-  split = int(np.floor(args.train_portion * num_train))
+    num_train = len(train_data)
+    indices = list(range(num_train))
+    split = int(np.floor(args.train_portion * num_train))
 
-  train_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=args.batch_size,
-      sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-      pin_memory=True, num_workers=2)
+    train_queue = torch.utils.data.DataLoader(
+        train_data, batch_size=args.batch_size,
+        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
+        pin_memory=True, num_workers=2)
 
-  valid_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=args.batch_size,
-      sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-      pin_memory=True, num_workers=2)
+    valid_queue = torch.utils.data.DataLoader(
+        train_data, batch_size=args.batch_size,
+        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
+        pin_memory=True, num_workers=2)
 
-  scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
-  architect = Architect(model, args)
+    architect = Architect(model, args)
 
-  for epoch in range(args.epochs):
-    scheduler.step()
-    lr = scheduler.get_lr()[0]
-    log_value("lr", lr, epoch)
-    logging.info('epoch %d lr %e', epoch, lr)
+    for epoch in range(args.epochs):
+        scheduler.step()
+        lr = scheduler.get_lr()[0]
+        log_value("lr", lr, epoch)
+        logging.info('epoch %d lr %e', epoch, lr)
+        # 根据alpha推测出cell的结构
+        genotype = model.genotype()
+        logging.info('genotype = %s', genotype)
 
-    genotype = model.genotype()
-    logging.info('genotype = %s', genotype)
+        # training
+        start_time = time.time()
+        train_acc, train_obj, alphas_time, forward_time, backward_time = train(train_queue, valid_queue, model,
+                                                                               architect, criterion, optimizer, lr)
+        end_time = time.time()
+        logging.info("train time %f", end_time - start_time)
+        logging.info("alphas_time %f ", alphas_time)
+        logging.info("forward_time %f", forward_time)
+        logging.info("backward_time %f", backward_time)
+        log_value('train_acc', train_acc, epoch)
+        logging.info('train_acc %f', train_acc)
 
-    # training
-    start_time = time.time()
-    train_acc, train_obj, alphas_time, forward_time, backward_time = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
-    end_time = time.time()
-    logging.info("train time %f", end_time - start_time)
-    logging.info("alphas_time %f ", alphas_time)
-    logging.info("forward_time %f", forward_time)
-    logging.info("backward_time %f", backward_time)
-    log_value('train_acc', train_acc, epoch)
-    logging.info('train_acc %f', train_acc)
+        # validation
+        start_time2 = time.time()
+        valid_acc, valid_obj = infer(valid_queue, model, criterion)
+        end_time2 = time.time()
+        logging.info("inference time %f", end_time2 - start_time2)
+        log_value('valid_acc', valid_acc, epoch)
+        logging.info('valid_acc %f', valid_acc)
+        logging.info('alphas_normal = %s', model.alphas_normal)
+        logging.info('alphas_reduce = %s', model.alphas_reduce)
 
-    # validation
-    start_time2 = time.time()
-    valid_acc, valid_obj = infer(valid_queue, model, criterion)
-    end_time2 = time.time()
-    logging.info("inference time %f", end_time2 - start_time2)
-    log_value('valid_acc', valid_acc, epoch)
-    logging.info('valid_acc %f', valid_acc)
-    logging.info('alphas_normal = %s', model.alphas_normal)
-    logging.info('alphas_reduce = %s', model.alphas_reduce)
-
-    utils.save(model, os.path.join(args.save, 'weights.pt'))
+        utils.save(model, os.path.join(args.save, 'weights.pt'))
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
-  objs = utils.AvgrageMeter()
-  top1 = utils.AvgrageMeter()
-  top5 = utils.AvgrageMeter()
-  alphas_time = 0
-  forward_time = 0
-  backward_time = 0
-  for step, (input, target) in enumerate(train_queue):
-    model.train()
-    n = input.size(0)
-    input = Variable(input, requires_grad=False).cuda()
-    target = Variable(target, requires_grad=False).cuda(async=True)
-    input_search, target_search = next(iter(valid_queue))
-    input_search = Variable(input_search, requires_grad=False).cuda()
-    target_search = Variable(target_search, requires_grad=False).cuda(async=True)
-    begin1 = time.time()
-    architect.step(input, target, input_search, target_search, lr, optimizer)
-    model.clip()
-    end1 = time.time()
-    alphas_time += end1 - begin1
-    optimizer.zero_grad()
-    model.binarization()
-    begin2 = time.time()
-    logits = model(input)
-    end2 = time.time()
-    forward_time += end2 - begin2
-    loss = criterion(logits, target)
-    
-    begin3 = time.time()
-    loss.backward()
-    end3 = time.time()
-    backward_time += end3 - begin3
-    model.restore()
-    nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
-    optimizer.step()
-    prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    # 用于保存loss的值
+    objs = utils.AvgrageMeter()
+    # 前1预测正确的概率
+    top1 = utils.AvgrageMeter()
+    # 前5预测正确的概率
+    top5 = utils.AvgrageMeter()
+    alphas_time = 0
+    forward_time = 0
+    backward_time = 0
+    for step, (input, target) in enumerate(train_queue):
+        model.train()
 
-    if step % args.report_freq == 0:
-      logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+        n = input.size(0)
+        input = Variable(input, requires_grad=False).cuda()
+        target = Variable(target, requires_grad=False).cuda(async=True)
+        # 更新alpha是用的验证集，所以每次从验证集里拿出一部分数据集
+        input_search, target_search = next(iter(valid_queue))
+        input_search = Variable(input_search, requires_grad=False).cuda()
+        target_search = Variable(target_search, requires_grad=False).cuda(async=True)
 
-  return top1.avg, objs.avg, alphas_time, forward_time, backward_time
+        begin1 = time.time()
+        # 对A进行discrete，即论文中的C1限制，同时计算了loss，对应论文中Algorithm的3和4行
+        architect.step(input, target, input_search, target_search, lr, optimizer)
+        # 直接对A进行clip，即论文中的C2限制
+        model.clip()
+        end1 = time.time()
+        alphas_time += end1 - begin1
+
+        optimizer.zero_grad()
+        # 对优化后的A进行discrete，对应论文中Algorithm的5行
+        model.binarization()
+
+        begin2 = time.time()
+        logits = model(input)
+        end2 = time.time()
+        forward_time += end2 - begin2
+
+        # 优化模型的参数w
+        loss = criterion(logits, target)
+        begin3 = time.time()
+        loss.backward()
+        end3 = time.time()
+        backward_time += end3 - begin3
+
+        model.restore()
+        nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        optimizer.step()
+
+        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+        objs.update(loss.data[0], n)
+        top1.update(prec1.data[0], n)
+        top5.update(prec5.data[0], n)
+
+        if step % args.report_freq == 0:
+            logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+
+    return top1.avg, objs.avg, alphas_time, forward_time, backward_time
 
 
 def infer(valid_queue, model, criterion):
-  objs = utils.AvgrageMeter()
-  top1 = utils.AvgrageMeter()
-  top5 = utils.AvgrageMeter()
-  model.eval()
-  model.binarization()
-  for step, (input, target) in enumerate(valid_queue):
-    input = Variable(input, volatile=True).cuda()
-    target = Variable(target, volatile=True).cuda(async=True)
+    objs = utils.AvgrageMeter()
+    top1 = utils.AvgrageMeter()
+    top5 = utils.AvgrageMeter()
+    model.eval()
+    model.binarization()
+    for step, (input, target) in enumerate(valid_queue):
+        input = Variable(input, volatile=True).cuda()
+        target = Variable(target, volatile=True).cuda(async=True)
 
-    logits = model(input)
-    loss = criterion(logits, target)
+        logits = model(input)
+        loss = criterion(logits, target)
 
-    prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+        n = input.size(0)
+        objs.update(loss.data[0], n)
+        top1.update(prec1.data[0], n)
+        top5.update(prec5.data[0], n)
 
-    if step % args.report_freq == 0:
-      logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
-  model.restore()
-  return top1.avg, objs.avg
+        if step % args.report_freq == 0:
+            logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+    model.restore()
+    return top1.avg, objs.avg
 
 
 if __name__ == '__main__':
-  main() 
-
+    main()
